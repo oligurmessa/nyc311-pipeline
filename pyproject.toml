@@ -1,0 +1,13 @@
+[project]
+name = "nyc311-pipeline"
+version = "0.1.0"
+description = "Incremental, tested pipeline for NYC 311 service requests"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["slow: integration tests that run dbt (~15s)"]
+
+[tool.ruff]
+line-length = 120

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/raw/
+*.duckdb
+*.duckdb.wal
+.env
+.dagster/
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+
+# Local dbt telemetry identifier
+dbt/.user.yml
