@@ -65,4 +65,30 @@ class SocrataClient:
     def window_where(updated_after: str, updated_through: str) -> str:
         return f":updated_at > '{updated_after}' AND :updated_at <= '{updated_through}'"
 
+    @staticmethod
+    def keyset_where(base_where: str, cursor: Cursor | None) -> str:
+        if cursor is None:
+            return base_where
+        return (f"({base_where}) AND ((:updated_at > '{cursor.updated_at}') OR "
+                f"(:updated_at = '{cursor.updated_at}' AND :id > '{cursor.row_id}'))")
 
+    def iter_pages(self, updated_after: str, updated_through: str, page_size: int = config.PAGE_SIZE,
+                   select: str = ":*,*") -> Iterator[list[dict]]:
+        """Yield pages of rows with :updated_at in (updated_after, updated_through], ordered by (:updated_at, :id)."""
+        base = self.window_where(updated_after, updated_through)
+        cursor: Cursor | None = None
+        page_no = 0
+        while True:
+            params = {"$select": select, "$where": self.keyset_where(base, cursor),
+                      "$order": ":updated_at,:id", "$limit": page_size}
+            t0 = time.time()
+            rows = self.get(params)
+            page_no += 1
+            log.info("page %d: %d rows in %.1fs", page_no, len(rows), time.time() - t0)
+            if not rows:
+                return
+            yield rows
+            last = rows[-1]
+            cursor = Cursor(last[":updated_at"], last[":id"])
+            if len(rows) < page_size:
+                return
