@@ -71,6 +71,24 @@ def write_batch(table: pa.Table, raw_dir: Path, ingest_date: str, batch_id: str)
 
 
 # --------------------------------------------------------------------------------------
+def resolve_window(con, start: str | None, now: datetime, raw_dir: Path = config.RAW_DIR) -> tuple[str, str]:
+    """Return (updated_after, updated_through) for this run."""
+    wm = state.last_successful_watermark(con)
+    if wm is None and not state.has_any_runs(con):
+        wm = state.watermark_from_raw(raw_dir)  # warehouse lost: rebuild the watermark from the landing zone
+        if wm:
+            log.warning("no run log found; watermark %s rebuilt from raw parquet", wm)
+    if start and wm:
+        raise SystemExit(f"--start given but a watermark already exists ({wm}); use --force-start to override")
+    if not wm:
+        if not start:
+            start = config.BACKFILL_START
+            log.info("no watermark found; backfilling from config.BACKFILL_START=%s", start)
+        lower = start
+    else:
+        lower = (datetime.fromisoformat(wm.replace("Z", "")) - timedelta(minutes=config.OVERLAP_MINUTES)).strftime("%Y-%m-%dT%H:%M:%S")
+    upper = now.strftime("%Y-%m-%dT%H:%M:%S")
+    return lower, upper
 
 
 
