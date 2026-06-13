@@ -91,7 +91,67 @@ def resolve_window(con, start: str | None, now: datetime, raw_dir: Path = config
     return lower, upper
 
 
+def run_ingest(client: SocrataClient | None = None, start: str | None = None, force_start: bool = False,
+               dry_run: bool = False, raw_dir: Path = config.RAW_DIR, db_path: Path = config.DB_PATH,
+               page_size: int = config.PAGE_SIZE) -> dict:
+    client = client or SocrataClient()
+    con = state.connect(db_path)
+    now = datetime.now(timezone.utc)
+    if force_start:
+        lower, upper = start, now.strftime("%Y-%m-%dT%H:%M:%S")
+    else:
+        lower, upper = resolve_window(con, start, now, raw_dir)
+    log.info("window: :updated_at in (%s, %s]", lower, upper)
+
+    if dry_run:
+        n = client.count(client.window_where(lower, upper))
+        log.info("dry run: %d rows would be fetched", n)
+        return {"window": (lower, upper), "rows": n, "dry_run": True}
+
+    run_id = now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
+    ingest_date = now.strftime("%Y-%m-%d")
+    state.start_run(con, run_id, now.strftime("%Y-%m-%dT%H:%M:%S"), lower, upper)
+
+    rows_total, files, max_seen, unexpected = 0, 0, None, set()
+    try:
+        for i, rows in enumerate(client.iter_pages(lower, upper, page_size=page_size)):
+            batch_id = f"{run_id}-{i:04d}"
+            table, extra = normalise_rows(rows, run_id, batch_id, state.utc_now_iso())
+            write_batch(table, raw_dir, ingest_date, batch_id)
+            rows_total += len(rows)
+            files += 1
+            unexpected |= extra
+            max_seen = max(max_seen or "", rows[-1][":updated_at"])
+        state.finish_run(con, run_id, "succeeded", rows_total, files, max_seen, unexpected)
+        state.ensure_raw_view(con, raw_dir)
+    except Exception as e:  # noqa: BLE001 - we want the run log to capture anything
+        state.finish_run(con, run_id, "failed", rows_total, files, max_seen, unexpected, error=repr(e))
+        log.exception("run %s failed after %d rows / %d files", run_id, rows_total, files)
+        raise
+    finally:
+        con.close()
+
+    if unexpected:
+        log.warning("schema drift: unexpected keys %s (stored in _extra)", sorted(unexpected))
+    log.info("run %s succeeded: %d rows, %d files, max :updated_at seen %s", run_id, rows_total, files, max_seen)
+    return {"run_id": run_id, "window": (lower, upper), "rows": rows_total, "files": files,
+            "max_updated_seen": max_seen, "unexpected_keys": sorted(unexpected)}
 
 
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--start", help="ISO timestamp; lower bound on :updated_at for a first run / backfill")
+    ap.add_argument("--force-start", action="store_true", help="use --start even if a watermark exists")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--page-size", type=int, default=config.PAGE_SIZE)
+    ap.add_argument("-v", "--verbose", action="store_true")
+    a = ap.parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if a.force_start and not a.start:
+        ap.error("--force-start requires --start")
+    result = run_ingest(start=a.start, force_start=a.force_start, dry_run=a.dry_run, page_size=a.page_size)
+    print(json.dumps(result, indent=2))
 
 
+if __name__ == "__main__":
+    main()
