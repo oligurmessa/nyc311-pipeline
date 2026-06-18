@@ -97,8 +97,40 @@ def test_normalise_rows_fixed_schema_and_extra_capture():
     assert unexpected == {"brand_new_col"} and json.loads(d["_extra"]) == {"brand_new_col": "x"}
 
 
+def test_first_run_backfills_then_second_run_is_incremental_with_overlap(env):
+    raw, db = env
+    rows = [mk(i, f"2026-09-0{1 + i % 5}T10:00:00.000Z") for i in range(10)]
+    c = FakeClient(rows)
+    r1 = ingest.run_ingest(c, start="2026-09-01T00:00:00", raw_dir=raw, db_path=db, page_size=4)
+    assert r1["rows"] == 10 and r1["files"] == 3         # all rows have :updated_at > Sep 1 00:00; 4+4+2
+    con = duckdb.connect(str(db))
+    assert con.execute("SELECT count(*) FROM raw.service_requests").fetchone()[0] == 10
+    wm = state.last_successful_watermark(con)
+    assert wm == r1["window"][1]                          # watermark = run start, not max seen
+    con.close()
+
+    # new activity arrives: one brand-new row and one update to an existing row
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    c.rows.append(mk(99, now))
+    c.rows.append(mk(3, now, status="Closed"))
+    c.rows.sort(key=lambda r: (r[":updated_at"], r[":id"]))
+    r2 = ingest.run_ingest(c, raw_dir=raw, db_path=db, page_size=4)
+    assert r2["rows"] == 2 and r2["window"][0] < wm      # overlap: lower bound is before the last watermark
+    con = duckdb.connect(str(db))
+    assert con.execute("SELECT count(*) FROM raw.service_requests").fetchone()[0] == 12
+    # the updated request now has two versions in raw; latest one is Closed
+    versions = con.execute("SELECT status FROM raw.service_requests WHERE unique_key = '10003' ORDER BY sys_updated_at").fetchall()
+    assert [v[0] for v in versions] == ["Open", "Closed"]
+    assert con.execute("SELECT count(*) FROM meta.ingest_runs WHERE status='succeeded'").fetchone()[0] == 2
 
 
+def test_start_refused_when_watermark_exists(env):
+    raw, db = env
+    c = FakeClient([mk(1, "2026-09-02T00:00:00.000Z")])
+    ingest.run_ingest(c, start="2026-09-01T00:00:00", raw_dir=raw, db_path=db)
+    with pytest.raises(SystemExit):
+        ingest.run_ingest(c, start="2026-09-01T00:00:00", raw_dir=raw, db_path=db)
+    ingest.run_ingest(c, start="2026-09-01T00:00:00", force_start=True, raw_dir=raw, db_path=db)  # explicit override ok
 
 
 
