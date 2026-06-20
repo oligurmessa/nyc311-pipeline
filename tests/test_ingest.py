@@ -133,7 +133,40 @@ def test_start_refused_when_watermark_exists(env):
     ingest.run_ingest(c, start="2026-09-01T00:00:00", force_start=True, raw_dir=raw, db_path=db)  # explicit override ok
 
 
+def test_failed_run_does_not_advance_watermark_and_keeps_partial_files(env):
+    raw, db = env
+    rows = [mk(i, "2026-09-05T01:00:00.000Z") for i in range(10)]
+    c = FakeClient(rows, fail_after_pages=1)
+    with pytest.raises(RuntimeError):
+        ingest.run_ingest(c, start="2026-09-01T00:00:00", raw_dir=raw, db_path=db, page_size=4)
+    con = duckdb.connect(str(db))
+    assert state.last_successful_watermark(con) is None
+    status, files = con.execute("SELECT status, files_written FROM meta.ingest_runs").fetchone()
+    assert status == "failed" and files == 1
+    assert len(list(raw.glob("ingest_date=*/*.parquet"))) == 1
+    con.close()
+    # recovery: next run re-fetches the whole window; raw now has duplicates, which is by design
+    c.fail_after_pages = None
+    c.calls.clear()
+    r = ingest.run_ingest(c, start="2026-09-01T00:00:00", raw_dir=raw, db_path=db, page_size=4)
+    assert r["rows"] == 10
+    con = duckdb.connect(str(db))
+    assert con.execute("SELECT count(*) FROM raw.service_requests").fetchone()[0] == 14
+    assert con.execute("SELECT count(DISTINCT unique_key) FROM raw.service_requests").fetchone()[0] == 10
 
 
+def test_dry_run_fetches_nothing(env):
+    raw, db = env
+    c = FakeClient([mk(1, "2026-09-02T00:00:00.000Z")])
+    r = ingest.run_ingest(c, start="2026-09-01T00:00:00", dry_run=True, raw_dir=raw, db_path=db)
+    assert r == {"window": r["window"], "rows": 1, "dry_run": True}
+    assert not list(raw.glob("**/*.parquet"))
 
 
+def test_watermark_rebuilt_from_raw_only_when_run_log_is_empty(env):
+    raw, db = env
+    c = FakeClient([mk(1, "2026-09-02T00:00:00.000Z"), mk(2, "2026-09-03T00:00:00.000Z")])
+    ingest.run_ingest(c, start="2026-09-01T00:00:00", raw_dir=raw, db_path=db)
+    db.unlink()                                                     # simulate losing the warehouse
+    r = ingest.run_ingest(c, raw_dir=raw, db_path=db)               # no --start needed: watermark comes from raw
+    assert r["window"][0] < "2026-09-03T00:00:00" and r["rows"] == 1  # overlap re-fetches the newest row only
