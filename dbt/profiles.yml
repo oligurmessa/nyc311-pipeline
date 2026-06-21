@@ -1,0 +1,10 @@
+# Local profile: the warehouse is a single DuckDB file at the repo root.
+# Select with: DBT_PROFILES_DIR=dbt  (or `dbt --profiles-dir dbt`)
+nyc311:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('NYC311_DB_PATH', '../warehouse.duckdb') }}"
+      threads: 1          # DuckDB allows one writer per process
+      extensions: []
