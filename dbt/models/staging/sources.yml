@@ -1,0 +1,27 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Append-only parquet landing zone written by `pipeline/ingest.py`, exposed as a DuckDB view.
+      One row per API record per pull; the same request can appear several times (one per state change,
+      plus one extra copy inside each run's overlap window).
+    schema: raw
+    tables:
+      - name: service_requests
+        description: NYC 311 service requests as returned by Socrata (all columns as text).
+        loaded_at_field: "try_cast(replace(sys_updated_at, 'Z', '') as timestamp)"
+        freshness:
+          warn_after: {count: 36, period: hour}     # publisher refreshes nightly; 36h = one missed refresh
+          error_after: {count: 72, period: hour}    # two missed refreshes: something is broken
+        columns:
+          - name: unique_key
+            tests: [not_null]
+          - name: sys_updated_at
+            tests: [not_null]
+
+  - name: meta
+    schema: meta
+    tables:
+      - name: ingest_runs
+        description: Run log written by the ingestion layer; the watermark is derived from it.
