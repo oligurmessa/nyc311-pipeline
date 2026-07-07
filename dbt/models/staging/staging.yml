@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: stg_311__service_requests
+    description: One row per 311 request, latest version, typed and cleaned. Incremental on `_ingested_at`.
+    columns:
+      - name: unique_key
+        description: Source primary key.
+        tests: [unique, not_null]
+      - name: created_at
+        tests: [not_null]
+      - name: status
+        description: Normalised status; anything unrecognised becomes 'Unspecified'.
+        tests:
+          - accepted_values: {arguments: {values: ['Closed', 'Open', 'In Progress', 'Assigned', 'Pending', 'Unspecified']}}
+      - name: borough
+        tests:
+          - accepted_values: {arguments: {values: ['BRONX', 'BROOKLYN', 'MANHATTAN', 'QUEENS', 'STATEN ISLAND']}}
+      - name: incident_zip
+        tests:
+          - zip_is_5_digits
+      - name: latitude
+        tests:
+          - within_range: {arguments: {min_value: 40.49, max_value: 40.92}}   # NYC bounding box
+      - name: longitude
+        tests:
+          - within_range: {arguments: {min_value: -74.26, max_value: -73.70}}
+      - name: source_updated_at
+        tests: [not_null]
+
+  - name: stg_311__request_versions
+    description: Replay log of every version of every request. One row per (unique_key, source_updated_at).
+    tests:
+      - unique:
+          arguments: {column_name: "unique_key || '|' || sys_updated_at"}
+    columns:
+      - name: unique_key
+        tests: [not_null]
