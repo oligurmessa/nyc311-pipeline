@@ -1,0 +1,53 @@
+version: 2
+
+models:
+  - name: fct_service_requests
+    description: One row per 311 request (current state). Grain = request.
+    columns:
+      - name: unique_key
+        tests: [unique, not_null]
+      - name: created_at
+        tests: [not_null]
+      - name: agency_key
+        tests:
+          - relationships: {arguments: {to: ref('dim_agency'), field: agency_key}}
+      - name: complaint_type_key
+        tests:
+          - not_null
+          - relationships: {arguments: {to: ref('dim_complaint_type'), field: complaint_type_key}}
+      - name: location_key
+        tests:
+          - relationships: {arguments: {to: ref('dim_location'), field: location_key}}
+      - name: status
+        tests:
+          - accepted_values: {arguments: {values: ['Closed', 'Open', 'In Progress', 'Assigned', 'Pending', 'Unspecified']}}
+      - name: hours_to_close
+        description: Null when not closed or when closed_at < created_at (flagged in has_invalid_close_time).
+        tests:
+          - within_range: {arguments: {min_value: 0, max_value: 100000}}
+
+  - name: fct_request_status_history
+    description: One row per observed version of a request; previous_status shows transitions.
+    tests:
+      - unique:
+          arguments: {column_name: "unique_key || '|' || sys_updated_at"}
+
+  - name: dim_agency
+    columns:
+      - name: agency_key
+        tests: [unique, not_null]
+  - name: dim_complaint_type
+    columns:
+      - name: complaint_type_key
+        tests: [unique, not_null]
+  - name: dim_location
+    columns:
+      - name: location_key
+        tests: [unique, not_null]
+      - name: borough
+        tests:
+          - accepted_values: {arguments: {values: ['BRONX', 'BROOKLYN', 'MANHATTAN', 'QUEENS', 'STATEN ISLAND']}}
+  - name: dim_date
+    columns:
+      - name: date_day
+        tests: [unique, not_null]
