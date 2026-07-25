@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: mart_daily_volume
+    description: Requests created per day x borough x complaint family x agency.
+    tests:
+      - unique:
+          arguments: {column_name: "created_date || borough || complaint_family || agency"}
+    columns:
+      - name: n_requests
+        tests:
+          - within_range: {arguments: {min_value: 1, max_value: 1000000}}
+  - name: mart_resolution_time
+    description: Weekly time-to-close distribution per agency.
+    columns:
+      - name: median_hours_to_close
+        tests:
+          - within_range: {arguments: {min_value: 0, max_value: 100000}}
+  - name: mart_open_backlog
+    description: Open requests by age bucket, agency and borough as of the last build.
+  - name: mart_pipeline_health
+    description: Single-row freshness and run summary used by the dashboard banner and the Dagster check.
+    columns:
+      - name: hours_since_source_update
+        tests:
+          - within_range: {arguments: {min_value: 0, max_value: "{{ var('max_hours_since_source_update', 72) }}"}}   # mirrors source freshness error threshold
