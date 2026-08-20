@@ -75,7 +75,31 @@ def test_schema_drift_check_warns_on_unexpected_keys(env):
     assert r.metadata["unexpected_keys"].value == ["brand_new_col"]
 
 
+def test_last_run_check_fails_on_failed_run(env):
+    raw, db, d = env
+    _land(raw, db, [_row(1, _hours_ago(1))])
+    assert d.last_ingest_run_succeeded().passed
+    _land(raw, db, [_row(2, _hours_ago(1))], run_id="run2", status="failed", ingested_at="2026-09-12T02:00:00")
+    r = d.last_ingest_run_succeeded()
+    assert not r.passed and r.metadata["error"].value == "boom"
 
 
+def test_duplicate_rate_check(env):
+    raw, db, d = env
+    _land(raw, db, [_row(i, _hours_ago(1)) for i in range(10)])
+    assert d.raw_duplicate_rate_is_sane().passed
+    # re-land the same 10 versions twice more: 30 rows, 10 distinct versions -> 67% duplicates
+    _land(raw, db, [_row(i, _hours_ago(1)) for i in range(10)], run_id="run2")
+    _land(raw, db, [_row(i, _hours_ago(1)) for i in range(10)], run_id="run3")
+    r = d.raw_duplicate_rate_is_sane()
+    assert not r.passed and r.metadata["duplicate_rate"].value > 0.6
 
 
+def test_definitions_load_and_wire_dbt_sources_to_ingest_asset():
+    from orchestration.definitions import defs, RAW_KEY, META_KEY
+    g = defs.resolve_asset_graph()
+    keys = set(g.get_all_asset_keys())
+    assert RAW_KEY in keys and META_KEY in keys
+    stg = next(k for k in keys if k.path[-1] == "stg_311__service_requests")
+    assert RAW_KEY in g.get(stg).parent_keys          # dbt source resolved to the ingest asset
+    assert [s.cron_schedule for s in defs.schedules] == ["15 */6 * * *"]
