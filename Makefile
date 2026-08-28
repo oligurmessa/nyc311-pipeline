@@ -27,3 +27,16 @@ run-pipeline:                    ## one headless end-to-end run: ingest -> check
 .PHONY: dashboard
 dashboard:                       ## Streamlit dashboard on :8501 (reads marts read-only)
 	.venv/bin/streamlit run dashboard/app.py --browser.gatherUsageStats false
+
+# ---- operations ----
+.PHONY: restore-state evidence
+restore-state:                   ## pull the latest successful GitHub Actions state (raw + run log) and rebuild the warehouse locally
+	@run_id=$$(gh run list --repo oligurmessa/nyc311-pipeline --workflow pipeline.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId'); \
+	echo "restoring state from run $$run_id"; rm -rf state-restore && \
+	gh run download $$run_id --repo oligurmessa/nyc311-pipeline --name pipeline-state --dir state-restore && \
+	rm -rf data/raw data/state && mkdir -p data && tar -xzf state-restore/state.tar.gz -C data && rm -rf state-restore && \
+	rm -f warehouse.duckdb && .venv/bin/python -m pipeline.state import && \
+	cd dbt && DBT_PROFILES_DIR=. ../.venv/bin/dbt build --quiet && cd .. && .venv/bin/python -m pipeline.state show
+
+evidence:                        ## print the README evidence section from the warehouse
+	.venv/bin/python scripts/evidence.py

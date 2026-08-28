@@ -12,3 +12,4 @@ dbt/logs/
 dbt/dbt_packages/
 data/state/
 dbt/.user.yml
+state-restore/

@@ -12,8 +12,8 @@ Socrata API ──> raw parquet (append-only) ──> DuckDB ──> dbt (stagin
 [![pipeline](https://github.com/oligurmessa/nyc311-pipeline/actions/workflows/pipeline.yml/badge.svg)](https://github.com/oligurmessa/nyc311-pipeline/actions/workflows/pipeline.yml)
 [![ci](https://github.com/oligurmessa/nyc311-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/oligurmessa/nyc311-pipeline/actions/workflows/ci.yml)
 
-Status: **steps 1–5 of 6 done.** The pipeline runs unattended on GitHub Actions every six hours; step 6 is
-collecting a few days of operational evidence (late-arriving updates, a missed refresh) into this document.
+Status: **all six steps built.** The pipeline runs unattended on GitHub Actions every six hours. Section 7 holds the
+operational evidence and is regenerated from the warehouse with `make evidence` as runs accumulate.
 
 ## Quick start
 
@@ -27,6 +27,8 @@ cd dbt && DBT_PROFILES_DIR=. dbt build && dbt source freshness   # transform + t
 make run-pipeline                                         # the same, orchestrated: ingest -> checks -> dbt
 make dagster-ui                                           # Dagster UI at :3000 (schedule runs while it is up)
 make dashboard                                            # Streamlit dashboard at :8501
+make restore-state                                        # pull the latest GitHub Actions state and rebuild the warehouse locally
+make evidence                                             # print section 7 of this README from the warehouse
 pytest                                                    # unit, asset-check and dbt integration tests (~15s)
 ```
 Python 3.11–3.13 (Dagster has no 3.14 wheels yet).
@@ -256,6 +258,64 @@ being captured.
 limit. Actions minutes and artifact storage are free for public repositories; a typical no-change run takes
 ~2 minutes, the daily run that carries the refresh ~5 minutes.
 
+### 7. Operational evidence
+
+Everything in this section is a query result or a workflow log line, not a hand-typed claim. Regenerate the
+tables with `make restore-state && make evidence`.
+
+**GitHub Actions, first two unattended runs (2026-10-01).**
+
+| run | restore step | ingest | dbt build | freshness | artifact | duration |
+|---|---|---|---|---|---|---|
+| [36891684160](https://github.com/oligurmessa/nyc311-pipeline/actions/runs/36891684160) | no previous artifact → backfill from `BACKFILL_START` | 932,098 rows, 19 files | PASS 50 · WARN 1 · ERROR 0 | PASS | 78 MB uploaded | 10 min 39 s |
+| [36893117108](https://github.com/oligurmessa/nyc311-pipeline/actions/runs/36893117108) | restored run 1's artifact: 19 files, 80 MB, 1 run imported | 0 rows (no refresh since) | PASS 50 · WARN 1 · ERROR 0 | PASS | 78 MB uploaded | 1 min 48 s |
+
+The second run is the one that matters: a stateless runner recovered the full landing zone and run log from the
+previous run, derived the watermark, asked the API only for the window since then, and rebuilt and tested the
+warehouse — in under two minutes. The runs before these two (CI red on a flaky test, pipeline red on a missing
+dbt manifest) are also in the Actions history; both were fixed in commit `bf71cc7`'s follow-up and are the kind
+of failure the workflows exist to surface.
+
+**Local runs (same code, persistent warehouse).**
+
+#### Ingest runs
+
+| run_id | status | watermark_from | watermark_to | rows_fetched | files_written | max_updated_seen | unexpected_keys |
+|---|---|---|---|---|---|---|---|
+| 20261001T150826Z-9c1313 | succeeded | 2026-09-01T00:00:00 | 2026-10-01T15:08:26 | 932,098 | 19 | 2026-10-01T01:47:27.963Z | [] |
+| 20261001T151736Z-2bc88b | succeeded | 2026-10-01T14:53:26 | 2026-10-01T15:17:36 | 0 | 0 |  | [] |
+| 20261001T154618Z-82adb4 | succeeded | 2026-10-01T15:02:36 | 2026-10-01T15:46:18 | 0 | 0 |  | [] |
+| 20261001T155317Z-3d0c42 | succeeded | 2026-10-01T15:31:18 | 2026-10-01T15:53:17 | 0 | 0 |  | [] |
+
+Each `watermark_from` is 15 minutes before the previous `watermark_to` (the overlap), and each `watermark_to`
+is the run's own start time, never the newest timestamp seen. No run has reported an unexpected column.
+
+#### Warehouse state
+
+| n_requests | newest_source_update | hours_since_source_update | n_invalid_close_time | n_successful_runs | n_failed_runs |
+|---|---|---|---|---|---|
+| 932,098 | 2026-10-01 01:47:27.963 | 9 | 357 | 4 | 0 |
+
+#### Raw layer: versions per request
+
+| n_versions | requests |
+|---|---|
+| 1 | 932,098 |
+
+#### Late-arriving updates captured
+
+_None yet._ Every request has been observed exactly once because the backfill and all runs so far happened
+between two nightly refreshes. The first scheduled run after the publisher's refresh (06:15 UTC on 2026-10-02)
+will land second versions for every request that changed overnight; `make evidence` then prints the
+transition table (`from_status → to_status`, counts, and days between creation and the observed closure). This
+paragraph will be replaced by that table.
+
+#### Data quality (stored failures, last build)
+
+| test | failing_rows |
+|---|---|
+| assert_closed_not_before_created | 357 |
+
 **Limitations.** The dashboard is not hosted (run `make dashboard` against a restored artifact, or point it at a
 persistent warehouse); artifacts expire after 14 days, so a fortnight of consecutive failures would trigger a
 fresh backfill; and the free tier offers no retry policy beyond the next scheduled run.
@@ -268,6 +328,7 @@ dbt/             models/staging, core, marts · tests/ (generic + singular) · m
 orchestration/   definitions.py: ingest multi-asset, dbt assets, 4 custom asset checks, job + 6-hourly schedule
 dashboard/       app.py: Streamlit page over the marts (freshness banner, volume, resolution, backlog, DQ, runs)
 .github/         workflows/pipeline.yml (6-hourly scheduled run with state artifact), workflows/ci.yml (tests on push/PR)
+scripts/         evidence.py: regenerates README section 7 from the warehouse
 tests/           pytest: ingestion (paging, overlap, recovery), asset checks (stale/drift/failed), dbt late-update merge
 data/raw/311/    parquet landing zone (git-ignored)
 warehouse.duckdb DuckDB warehouse (git-ignored)
