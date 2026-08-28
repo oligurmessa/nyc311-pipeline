@@ -85,9 +85,9 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          python -m pipeline.state show | tail -3 >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          python - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          python -m pipeline.state show 2>/dev/null | tail -3 >> "$GITHUB_STEP_SUMMARY" || echo "(no run log)" >> "$GITHUB_STEP_SUMMARY"
+          python - >> "$GITHUB_STEP_SUMMARY" 2>&1 <<'PY' || true
           import duckdb
           con = duckdb.connect("warehouse.duckdb", read_only=True)
           print(con.execute("select n_requests, newest_source_update, hours_since_source_update, last_successful_rows, n_invalid_close_time from marts.mart_pipeline_health").df().to_string(index=False))

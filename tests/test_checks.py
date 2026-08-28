@@ -86,11 +86,12 @@ def test_last_run_check_fails_on_failed_run(env):
 
 def test_duplicate_rate_check(env):
     raw, db, d = env
-    _land(raw, db, [_row(i, _hours_ago(1)) for i in range(10)])
+    ts = _hours_ago(1)   # one fixed timestamp: the same *version* re-landed, not three versions a second apart
+    _land(raw, db, [_row(i, ts) for i in range(10)])
     assert d.raw_duplicate_rate_is_sane().passed
     # re-land the same 10 versions twice more: 30 rows, 10 distinct versions -> 67% duplicates
-    _land(raw, db, [_row(i, _hours_ago(1)) for i in range(10)], run_id="run2")
-    _land(raw, db, [_row(i, _hours_ago(1)) for i in range(10)], run_id="run3")
+    _land(raw, db, [_row(i, ts) for i in range(10)], run_id="run2")
+    _land(raw, db, [_row(i, ts) for i in range(10)], run_id="run3")
     r = d.raw_duplicate_rate_is_sane()
     assert not r.passed and r.metadata["duplicate_rate"].value > 0.6
 

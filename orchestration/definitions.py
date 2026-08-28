@@ -55,7 +55,9 @@ FRESHNESS_ERROR_HOURS = 72
 os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
 DBT_EXE = shutil.which("dbt") or str(Path(sys.executable).parent / "dbt")
 dbt_project = DbtProject(project_dir=ROOT / "dbt", profiles_dir=ROOT / "dbt")
-dbt_project.prepare_if_dev()
+dbt_project.prepare_if_dev()                    # `dagster dev`: re-parse on every reload
+if not dbt_project.manifest_path.exists():      # headless / CI: a fresh checkout has no target/manifest.json
+    dbt_project.preparer.prepare(dbt_project)   # equivalent to `dbt parse`
 
 
 # --------------------------------------------------------------------------------------
