@@ -10,6 +10,5 @@ data/raw/
 dbt/target/
 dbt/logs/
 dbt/dbt_packages/
-
-# Local dbt telemetry identifier
+data/state/
 dbt/.user.yml

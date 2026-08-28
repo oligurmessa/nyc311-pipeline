@@ -82,3 +82,44 @@ def ensure_raw_view(con, raw_dir: Path = config.RAW_DIR) -> None:
     glob = f"{raw_dir}/ingest_date=*/*.parquet"
     if list(raw_dir.glob("ingest_date=*/*.parquet")):
         con.execute(f"CREATE OR REPLACE VIEW raw.service_requests AS SELECT * FROM read_parquet('{glob}', union_by_name=true, hive_partitioning=true)")
+
+
+# --------------------------------------------------------------------------------------
+# Portable state: the run log travels with the raw parquet between stateless CI runs.
+# --------------------------------------------------------------------------------------
+def export_runs(con, path: Path) -> int:
+    rows = con.execute("SELECT * FROM meta.ingest_runs ORDER BY started_at").fetchall()
+    cols = [d[0] for d in con.description]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([dict(zip(cols, r)) for r in rows], indent=1, default=str))
+    return len(rows)
+
+
+def import_runs(con, path: Path) -> int:
+    if not path.exists():
+        return 0
+    rows = json.loads(path.read_text())
+    cols = ["run_id", "started_at", "finished_at", "status", "watermark_from", "watermark_to", "rows_fetched",
+            "files_written", "max_updated_seen", "unexpected_keys", "error"]
+    con.execute("DELETE FROM meta.ingest_runs")
+    con.executemany(f"INSERT INTO meta.ingest_runs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                    [[r.get(c) for c in cols] for r in rows])
+    return len(rows)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Export/import the ingest run log (meta.ingest_runs) as JSON.")
+    ap.add_argument("action", choices=["export", "import", "show"])
+    ap.add_argument("--path", default=str(config.DATA_DIR / "state" / "ingest_runs.json"))
+    a = ap.parse_args()
+    c = connect(config.DB_PATH)
+    if a.action == "export":
+        print(f"exported {export_runs(c, Path(a.path))} runs -> {a.path}")
+    elif a.action == "import":
+        print(f"imported {import_runs(c, Path(a.path))} runs <- {a.path}")
+        ensure_raw_view(c, config.RAW_DIR)
+    else:
+        print(c.execute("SELECT run_id, status, watermark_from, watermark_to, rows_fetched, files_written FROM meta.ingest_runs ORDER BY started_at").df().to_string())
+    c.close()

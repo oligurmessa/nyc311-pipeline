@@ -9,8 +9,11 @@ Socrata API ──> raw parquet (append-only) ──> DuckDB ──> dbt (stagin
                       └──────────── Dagster schedule + asset checks ────────────┘
 ```
 
-Status: **steps 1–4 of 6 done** (ingestion; dbt models, tests and freshness; Dagster orchestration; Streamlit
-dashboard). CI/scheduled runs on GitHub Actions and operations notes follow.
+[![pipeline](https://github.com/oligurmessa/nyc311-pipeline/actions/workflows/pipeline.yml/badge.svg)](https://github.com/oligurmessa/nyc311-pipeline/actions/workflows/pipeline.yml)
+[![ci](https://github.com/oligurmessa/nyc311-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/oligurmessa/nyc311-pipeline/actions/workflows/ci.yml)
+
+Status: **steps 1–5 of 6 done.** The pipeline runs unattended on GitHub Actions every six hours; step 6 is
+collecting a few days of operational evidence (late-arriving updates, a missed refresh) into this document.
 
 ## Quick start
 
@@ -209,9 +212,53 @@ write lock it says so and stops rather than showing a half-built state.
 
 ![data quality panel](images/dashboard_quality.jpg)
 
-### 6. Operations
+### 6. Operations: how it runs unattended
 
-*To be written as that step lands.*
+**Two workflows.**
+
+| workflow | trigger | what it does |
+|---|---|---|
+| `pipeline.yml` | cron `15 */6 * * *` UTC, or manual | restore state → Dagster job (ingest → checks → dbt build + tests) → `dbt source freshness` → upload state |
+| `ci.yml` | push to `main`, pull requests | `dbt parse`, the full pytest suite (unit, asset checks, dbt integration on a fixture warehouse), Dagster definitions load |
+
+**State between stateless runs.** A GitHub runner starts empty, so the pipeline's state travels as a workflow
+artifact: `state.tar.gz` holds the raw parquet landing zone (~80 MB, growing ~2–3 MB per day) and the ingest run
+log exported to JSON. The next run downloads the artifact from the *last successful* run (`gh run download`),
+re-imports the run log, recreates the raw view and rebuilds the DuckDB warehouse with a full `dbt build`
+(seconds on ~1M rows). The 224 MB warehouse file itself is never persisted: **raw is the source of truth and the
+warehouse is a derived, disposable cache**, which is exactly the property the incremental design was built to
+guarantee. On a persistent host (a VM, `dagster dev`, Dagster+) the same code keeps the warehouse and the dbt
+models run incrementally, as shown in section 2.
+
+**Concurrency and ordering.** The workflow uses a concurrency group so two scheduled runs can never race on
+the same state. Because each run's artifact is the *input* of the next, a failed run uploads nothing and the
+next run restores the last good state and re-fetches the same window — the same guarantee the local run log
+gives (section 1), now at the artifact level.
+
+**Failing loudly.** A dbt test error, a blocking Dagster asset check, a freshness error or an ingest exception
+fails the job → the workflow run turns red → GitHub emails the repository owner (default notification policy)
+and the README badge flips. Warnings (closed-before-created count, schema drift, duplicate rate) are visible in
+the run log and the job summary without failing the run. The job summary also prints the health mart and the
+number of status transitions observed, so a glance at the Actions tab shows whether late-arriving updates are
+being captured.
+
+**Recovery playbook.**
+
+| situation | action |
+|---|---|
+| a run failed (API outage, runner error) | nothing: the next scheduled run restores the last good state and re-fetches the window |
+| source went stale (> 72 h) | freshness check blocks dbt; marts keep their last good state; investigate the publisher's status page |
+| schema drift warning | new keys are already preserved in `_extra`; add them to `config.DATA_COLUMNS` and the staging model |
+| need to re-load a period | manual run with `backfill_start` input → `--force-start`; raw keeps old copies, staging dedupes |
+| lost all artifacts (> 14 days of failures) | the first run backfills from `BACKFILL_START` automatically |
+
+**Secrets and cost.** No secrets are required; `SOCRATA_APP_TOKEN` is optional and only raises the API rate
+limit. Actions minutes and artifact storage are free for public repositories; a typical no-change run takes
+~2 minutes, the daily run that carries the refresh ~5 minutes.
+
+**Limitations.** The dashboard is not hosted (run `make dashboard` against a restored artifact, or point it at a
+persistent warehouse); artifacts expire after 14 days, so a fortnight of consecutive failures would trigger a
+fresh backfill; and the free tier offers no retry policy beyond the next scheduled run.
 
 ## Repository
 
@@ -220,6 +267,7 @@ pipeline/        config.py, socrata.py (client + keyset paging), state.py (run l
 dbt/             models/staging, core, marts · tests/ (generic + singular) · macros/ · profiles.yml (DuckDB)
 orchestration/   definitions.py: ingest multi-asset, dbt assets, 4 custom asset checks, job + 6-hourly schedule
 dashboard/       app.py: Streamlit page over the marts (freshness banner, volume, resolution, backlog, DQ, runs)
+.github/         workflows/pipeline.yml (6-hourly scheduled run with state artifact), workflows/ci.yml (tests on push/PR)
 tests/           pytest: ingestion (paging, overlap, recovery), asset checks (stale/drift/failed), dbt late-update merge
 data/raw/311/    parquet landing zone (git-ignored)
 warehouse.duckdb DuckDB warehouse (git-ignored)

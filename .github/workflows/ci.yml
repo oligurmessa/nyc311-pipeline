@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["README.md", "images/**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -q -r requirements.txt
+      - name: dbt parse (catches model/yaml errors without data)
+        working-directory: dbt
+        env: {DBT_PROFILES_DIR: ., NYC311_DB_PATH: /tmp/ci.duckdb}
+        run: dbt parse --quiet
+      - name: pytest (unit + asset checks + dbt integration on a fixture warehouse)
+        run: python -m pytest -q
+      - name: Dagster definitions load
+        run: python -c "from orchestration.definitions import defs; print(len(defs.resolve_asset_graph().get_all_asset_keys()), 'assets')"

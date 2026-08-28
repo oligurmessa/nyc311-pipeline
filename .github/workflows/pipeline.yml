@@ -1,0 +1,111 @@
+name: pipeline
+
+# The production clock. Every 6 hours (and on demand) this job:
+#   1. restores the previous run's state (raw parquet landing zone + ingest run log) from the last
+#      successful workflow artifact,
+#   2. rebuilds the DuckDB warehouse from it (raw is the source of truth; dbt rebuild takes seconds),
+#   3. runs the Dagster job headlessly: ingest (incremental) -> asset checks -> dbt build (+ tests),
+#   4. runs dbt source freshness,
+#   5. uploads the new state as this run's artifact.
+# Any failed test, check or freshness error fails the job, which fails the workflow, which notifies.
+
+on:
+  schedule:
+    - cron: "15 */6 * * *"      # 00:15, 06:15, 12:15, 18:15 UTC (publisher refreshes ~01:33 UTC)
+  workflow_dispatch:
+    inputs:
+      backfill_start:
+        description: "Optional ISO timestamp: ignore restored state and backfill :updated_at from here"
+        required: false
+        default: ""
+
+concurrency:
+  group: pipeline-state          # never let two runs race on the same state
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read                  # to find and download the previous run's artifact
+
+env:
+  PYTHON_VERSION: "3.12"
+  STATE_ARTIFACT: pipeline-state
+  DAGSTER_HOME: ${{ github.workspace }}/.dagster
+  SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}   # optional; higher rate limits
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install
+        run: pip install -q -r requirements.txt
+
+      - name: Restore state from the last successful run
+        if: ${{ github.event.inputs.backfill_start == '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh run list --workflow pipeline.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId' || true)
+          if [ -z "${run_id:-}" ] || [ "$run_id" = "null" ]; then
+            echo "::warning::no previous successful run; this run will backfill from config.BACKFILL_START"
+            exit 0
+          fi
+          echo "restoring $STATE_ARTIFACT from run $run_id"
+          gh run download "$run_id" --name "$STATE_ARTIFACT" --dir state-restore
+          mkdir -p data
+          tar -xzf state-restore/state.tar.gz -C data
+          python -m pipeline.state import
+          python -m pipeline.state show | tail -5
+          echo "raw files: $(find data/raw -name '*.parquet' | wc -l), size: $(du -sh data/raw | cut -f1)"
+
+      - name: Backfill from explicit start (manual runs only)
+        if: ${{ github.event.inputs.backfill_start != '' }}
+        run: python -m pipeline.ingest --start "${{ github.event.inputs.backfill_start }}" --force-start
+
+      - name: Run pipeline (ingest -> checks -> dbt build)
+        run: |
+          mkdir -p "$DAGSTER_HOME" && touch "$DAGSTER_HOME/dagster.yaml"
+          dagster asset materialize -m orchestration.definitions --select '*'
+
+      - name: dbt source freshness
+        working-directory: dbt
+        env:
+          DBT_PROFILES_DIR: .
+        run: dbt source freshness
+
+      - name: Summary
+        if: always()
+        run: |
+          python -m pipeline.state show | tail -3 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          python - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import duckdb
+          con = duckdb.connect("warehouse.duckdb", read_only=True)
+          print(con.execute("select n_requests, newest_source_update, hours_since_source_update, last_successful_rows, n_invalid_close_time from marts.mart_pipeline_health").df().to_string(index=False))
+          print(con.execute("select count(*) as transitions_observed from core.fct_request_status_history where version_no > 1").df().to_string(index=False))
+          PY
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package state
+        if: success()
+        run: |
+          python -m pipeline.state export
+          tar -czf state.tar.gz -C data raw state
+          ls -la state.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: ${{ env.STATE_ARTIFACT }}
+          path: state.tar.gz
+          retention-days: 14
+          if-no-files-found: error
